@@ -1,5 +1,3 @@
-micromamba install -y -c rapidsai-nightly -c conda-forge cuvs libcuvs cupy cuda-version=13.0
-
 # cuvs-playground
 
 Baseline brute-force kNN on synthetic 100k x 128 vectors using NVIDIA cuVS.
