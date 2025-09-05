@@ -14,14 +14,14 @@ from cuvs.neighbors import ivf_flat
 # ---------------------------
 # Config (tweak as needed)
 # ---------------------------
-N = int(os.getenv("N", 100_000))     # database vectors
-D = int(os.getenv("D", 128))         # dimensions
+N = int(os.getenv("N", 1000_000))     # database vectors
+D = int(os.getenv("D", 256))         # dimensions
 Q = int(os.getenv("Q", 1_000))       # queries
 K = int(os.getenv("K", 10))          # top-k
 METRIC = os.getenv("METRIC", "sqeuclidean")  # or "cosine"
 BATCH = int(os.getenv("BATCH", 50))  # micro-batch size for timing
 N_LISTS = int(os.getenv("N_LISTS", 1024))
-N_PROBES_LIST = [8, 16, 32, 64, 128, 256]
+N_PROBES_LIST = [8, 16, 32, 64, 128, 256, 512]
 
 RUNS_DIR = Path("runs")
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
