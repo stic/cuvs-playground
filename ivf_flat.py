@@ -11,17 +11,29 @@ import cupy as cp
 from cuvs.neighbors import brute_force as bf
 from cuvs.neighbors import ivf_flat
 
+from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo, nvmlShutdown
+import rmm
+
+
 # ---------------------------
 # Config (tweak as needed)
 # ---------------------------
-N = int(os.getenv("N", 1000_000))     # database vectors
+N = int(os.getenv("N", 3000_000))     # database vectors
 D = int(os.getenv("D", 256))         # dimensions
 Q = int(os.getenv("Q", 1_000))       # queries
 K = int(os.getenv("K", 10))          # top-k
 METRIC = os.getenv("METRIC", "sqeuclidean")  # or "cosine"
-BATCH = int(os.getenv("BATCH", 50))  # micro-batch size for timing
-N_LISTS = int(os.getenv("N_LISTS", 1024))
-N_PROBES_LIST = [8, 16, 32, 64, 128, 256, 512]
+BATCH = int(os.getenv("BATCH", 256))  # micro-batch size for timing
+
+def recommend_nlists(N):
+    raw = int(4 * np.sqrt(N))
+    # snap to nearest power of two between 256 and 16384
+    p2 = 2**int(np.round(np.log2(np.clip(raw, 256, 16384))))
+    return int(p2)
+
+N_LISTS = int(os.getenv("N_LISTS", recommend_nlists(N)))
+ratios = [0.01, 0.1, 0.33, 0.5]
+N_PROBES_LIST = [max(1, int(np.ceil(r * N_LISTS))) for r in ratios]
 
 RUNS_DIR = Path("runs")
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -53,9 +65,10 @@ def gpu_name_str():
     name = props["name"]
     return name.decode() if isinstance(name, bytes) else str(name)
 
-def mem_used_mb():
-    free_b, total_b = cp.cuda.runtime.memGetInfo()
-    return (total_b - free_b) / (1024**2)  # MB
+def gpu_mem_mb():
+    h = nvmlDeviceGetHandleByIndex(0)
+    m = nvmlDeviceGetMemoryInfo(h)
+    return m.used / (1024**2)
 
 def time_gpu_ms(fn, *args, **kwargs):
     """Time a single GPU operation with CUDA events; returns (result, elapsed_ms)."""
@@ -76,7 +89,7 @@ def batched_search(search_callable, queries, k, batch_size=BATCH, track_vram_pea
     """
     Q = queries.shape[0]
     I_chunks, D_chunks, lat_ms = [], [], []
-    peak_used = mem_used_mb() if track_vram_peak else None
+    peak_used = gpu_mem_mb() if track_vram_peak else None
 
     for i in range(0, Q, batch_size):
         q_chunk = queries[i:i+batch_size]
@@ -89,7 +102,7 @@ def batched_search(search_callable, queries, k, batch_size=BATCH, track_vram_pea
         lat_ms.append(dt_ms)
 
         if track_vram_peak:
-            peak_used = max(peak_used, mem_used_mb())
+            peak_used = max(peak_used, gpu_mem_mb())
 
     I = cp.concatenate(I_chunks, axis=0)
     D = cp.concatenate(D_chunks, axis=0)
@@ -122,6 +135,8 @@ def write_rows(rows):
         "metric",
         "build_ms",
         "n_probes",
+        "scanned_frac",
+        "cands_per_query",
         "recall@10",
         "p50_ms", "p95_ms", "qps",
         "vram_peak_mb",
@@ -150,16 +165,21 @@ cuda_version = cuda_version_str()
 notes = os.getenv("NOTES", "")
 
 rows = []
+nvmlInit()
+rmm.reinitialize(
+    pool_allocator=True,
+    initial_pool_size=6 * 1024**3,  # 6GiB pool for a 6GB GPU
+)
 
 # ---------------------------
 # Brute-force baseline (GT)
 # ---------------------------
 # Build BF index
-bf_build_start_used = mem_used_mb()
+bf_build_start_used = gpu_mem_mb()
 (gt_index, bf_build_ms) = time_gpu_ms(
     lambda: bf.build(xb, metric=METRIC)
 )
-bf_used_after_build = mem_used_mb()
+bf_used_after_build = gpu_mem_mb()
 bf_vram_used_build = max(0.0, bf_used_after_build - bf_build_start_used)
 bf_peak_used = bf_used_after_build  # will update while searching
 
@@ -180,6 +200,8 @@ rows.append({
     "metric": METRIC,
     "build_ms": round(bf_build_ms, 3),
     "n_probes": 0,
+    "scanned_frac": 1.0,  # always 1.0 for BF; same as
+    "cands_per_query": N,  # always N for BF; same as
     "recall@10": round(1.0, 6),              # exact
     "p50_ms": round(bf_p50, 3),
     "p95_ms": round(bf_p95, 3),
@@ -191,14 +213,18 @@ rows.append({
     "notes": notes,
 })
 
+rmm.reinitialize(
+    pool_allocator=True,
+    initial_pool_size=6 * 1024**3,  # 6GiB pool for a 6GB GPU
+)
 # ---------------------------
 # IVF-Flat build
 # ---------------------------
-ivf_build_start_used = mem_used_mb()
+ivf_build_start_used = gpu_mem_mb()
 (ivf_index, ivf_build_ms) = time_gpu_ms(
     lambda: ivf_flat.build(ivf_flat.IndexParams(n_lists=N_LISTS, metric=METRIC), xb)
 )
-ivf_used_after_build = mem_used_mb()
+ivf_used_after_build = gpu_mem_mb()
 ivf_vram_used_build = max(0.0, ivf_used_after_build - ivf_build_start_used)
 
 # ---------------------------
@@ -229,6 +255,8 @@ for nprobes in N_PROBES_LIST:
         "metric": METRIC,
         "build_ms": round(ivf_build_ms, 3),
         "n_probes": nprobes,
+        "scanned_frac": round(nprobes / N_LISTS, 4),
+        "cands_per_query": int((N / N_LISTS) * nprobes),
         "recall@10": round(r10, 6),
         "p50_ms": round(p50_ms, 3),
         "p95_ms": round(p95_ms, 3),
@@ -239,6 +267,8 @@ for nprobes in N_PROBES_LIST:
         "cuda_version": cuda_version,
         "notes": notes,
     })
+
+nvmlShutdown()
 
 # ---------------------------
 # Write results
