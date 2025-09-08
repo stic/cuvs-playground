@@ -1,4 +1,4 @@
-# cuvs_ivf_flat_benchmark.py
+# ivf_pq.py
 # Requirements: cupy, cuvs (Python), a CUDA-capable GPU.
 
 import os, csv
@@ -218,7 +218,7 @@ rmm.reinitialize(
     initial_pool_size=6 * 1024**3,  # 6GiB pool for a 6GB GPU
 )
 # ---------------------------
-# IVF-Flat build
+# IVF-PQ build
 # ---------------------------
 ivfpq_build_start_used = gpu_mem_mb()
 (ivfpq_index, ivfpq_build_ms) = time_gpu_ms(
@@ -228,7 +228,7 @@ ivfpq_used_after_build = gpu_mem_mb()
 ivfpq_vram_used_build = max(0.0, ivfpq_used_after_build - ivfpq_build_start_used)
 
 # ---------------------------
-# IVF-Flat searches (sweep n_probes)
+# IVF-PQ searches (sweep n_probes)
 # ---------------------------
 peak_used_all = ivfpq_used_after_build
 
